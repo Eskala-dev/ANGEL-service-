@@ -40,8 +40,8 @@ const socketServer = (httpServer) => {
       socket.broadcast.emit('server:updateOrder(FINISH_RESERVA)', info);
     });
 
-    socket.on('client:updateOrder(ENTREGAR)', (info) => {
-      socket.broadcast.emit('server:updateOrder(ENTREGAR)', info);
+    socket.on('client:updateOrder(ENTREGA)', (info) => {
+      socket.broadcast.emit('server:updateOrder(ENTREGA)', info);
     });
 
     socket.on('client:updateOrder(CANCELAR_ENTREGA)', (info) => {

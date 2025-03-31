@@ -2,6 +2,7 @@ import express from 'express';
 import CuadreDiario from '../models/cuadreDiario.js';
 import Factura from '../models/Factura.js';
 import Gasto from '../models/gastos.js';
+import Negocio from '../models/negocio.js';
 import moment from 'moment';
 
 import { openingHours } from '../middleware/middleware.js';
@@ -88,6 +89,30 @@ router.put('/update-cuadre/:id', openingHours, async (req, res) => {
   }
 });
 
+router.delete('/delete-cuadre/:id', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    // Buscar y eliminar el documento por ID
+    const deletedCuadre = await CuadreDiario.findByIdAndDelete(id);
+
+    if (!deletedCuadre) {
+      return res.status(404).json({ mensaje: 'Cuadre no encontrado' });
+    }
+
+    const socketId = req.headers['x-socket-id'];
+
+    // Emitir eventos a los clientes conectados
+    emitToClients('server:changeCuadre', '', socketId);
+    emitToClients('server:changeCuadre:child', '', socketId);
+
+    res.json({ mensaje: 'Cuadre eliminado con éxito' });
+  } catch (error) {
+    console.error('Error al eliminar el cuadre:', error);
+    res.status(500).json({ mensaje: 'Error al eliminar el cuadre' });
+  }
+});
+
 async function obtenerInformacionDetallada(listCuadres) {
   try {
     // Recopilar todos los IDs de pagos y gastos
@@ -95,39 +120,18 @@ async function obtenerInformacionDetallada(listCuadres) {
     const gastoIds = listCuadres.flatMap((cuadre) => cuadre.Gastos);
 
     // Obtener información de pagos y gastos en una sola consulta por tipo
-    const pagos = await Pagos.find(
-      { _id: { $in: pagoIds } },
-      {
-        total: 1,
-        metodoPago: 1,
-        idOrden: 1,
-        idUser: 1,
-      }
-    );
+    const pagos = await Pagos.find({ _id: { $in: pagoIds } }, { total: 1, metodoPago: 1, idOrden: 1, idUser: 1 });
 
     const gastos = await Gasto.find(
       { _id: { $in: gastoIds } },
-      {
-        date: 1,
-        motivo: 1,
-        tipo: 1,
-        monto: 1,
-        idUser: 1,
-      }
+      { date: 1, motivo: 1, tipo: 1, monto: 1, idUser: 1, metodoGasto: 1 }
     );
 
     // Recopilar todos los IDs de orden de los pagos
     const idOrdenesPagos = pagos.map((pago) => pago.idOrden);
 
     // Obtener información de facturas en una sola consulta
-    const facturas = await Factura.find(
-      { _id: { $in: idOrdenesPagos } },
-      {
-        codRecibo: 1,
-        Nombre: 1,
-        delivery: 1,
-      }
-    );
+    const facturas = await Factura.find({ _id: { $in: idOrdenesPagos } }, { codRecibo: 1, Nombre: 1, delivery: 1 });
 
     // Mapear IDs de pagos, gastos y facturas a sus respectivos objetos
     const pagosMap = mapObjectByKey(pagos, '_id');
@@ -138,7 +142,17 @@ async function obtenerInformacionDetallada(listCuadres) {
     for (let cuadre of listCuadres) {
       cuadre.Pagos = cuadre.Pagos.map((pagoId) => {
         const pago = pagosMap[pagoId];
+        if (!pago) {
+          console.warn(`⚠️ Pago no encontrado: ${pagoId}`);
+          return null;
+        }
+
         const factura = facturasMap[pago.idOrden];
+        if (!factura) {
+          console.warn(`⚠️ Factura no encontrada para idOrden: ${pago.idOrden}`);
+          return null;
+        }
+
         return {
           _id: pagoId,
           codRecibo: factura.codRecibo,
@@ -148,10 +162,15 @@ async function obtenerInformacionDetallada(listCuadres) {
           delivery: factura.delivery,
           idUser: pago.idUser,
         };
-      });
+      }).filter(Boolean); // Filtrar elementos nulos
 
       cuadre.Gastos = cuadre.Gastos.map((gastoId) => {
         const gasto = gastosMap[gastoId];
+        if (!gasto) {
+          console.warn(`⚠️ Gasto no encontrado: ${gastoId}`);
+          return null;
+        }
+
         return {
           _id: gastoId,
           tipo: gasto.tipo,
@@ -159,17 +178,14 @@ async function obtenerInformacionDetallada(listCuadres) {
           motivo: gasto.motivo,
           monto: gasto.monto,
           idUser: gasto.idUser,
+          metodoGasto: gasto.metodoGasto,
         };
-      });
-
-      // Obtener información de usuario para el cuadre
-      cuadre.infoUser = await handleGetInfoUser(cuadre.userID);
-      cuadre.userID = undefined;
+      }).filter(Boolean); // Filtrar elementos nulos
     }
 
     return listCuadres;
   } catch (error) {
-    console.error('Error al obtener información detallada:', error);
+    console.error('❌ Error al obtener información detallada:', error);
     throw new Error('Error al obtener información detallada');
   }
 }
@@ -220,6 +236,7 @@ const handleGetMovimientosNCuadre = async (date, listCuadres) => {
       total: pago.total,
       metodoPago: pago.metodoPago,
       delivery: factura ? factura.delivery : null,
+      detail: pago.detail,
       isCounted: true,
       infoUser: UsuariosMap.get(pago.idUser),
     };
@@ -243,48 +260,89 @@ router.get('/get-cuadre/:idUsuario/:datePrincipal', async (req, res) => {
   try {
     const { idUsuario, datePrincipal } = req.params;
 
-    // 1. Encontrar el último cuadre de toda la colección.
-    let lastCuadre = await CuadreDiario.findOne().sort({ index: -1 }).lean();
+    const infoNegocio = await Negocio.findOne({}, { typeSavedOnCuadre: 1 }).lean();
+    if (!infoNegocio) {
+      return res.status(404).json({ message: 'Hubo un error al traer informacion de negocio' });
+    }
+
+    const typeSavedOnCuadre = infoNegocio.typeSavedOnCuadre;
+
+    // Generar el rango de fecha utilizando Moment.js
+    const startOfDay = moment(datePrincipal).startOf('day').toDate();
+    const endOfDay = moment(datePrincipal).endOf('day').toDate();
+
+    // Filtro base para el rango de fecha
+    let filter = { date: { $lte: moment().endOf('day').toDate() } };
+
+    // Si es "user", agregar el filtro para el usuario
+    if (typeSavedOnCuadre === 'user') {
+      filter['savedInNameOf.idUsuario'] = idUsuario;
+    }
+
+    const ultimoCuadre = await CuadreDiario.findOne()
+      .sort({ date: -1 }) // Ordenar por fecha descendente
+      .lean();
+
+    // Buscar el último registro basado en la fecha proporcionada
+    let lastCuadreByTypeSaved = await CuadreDiario.findOne(filter)
+      .sort({ date: -1 }) // Ordenar por fecha descendente
+      .lean();
 
     // 2. Buscar por la fecha dada.
     let listCuadres = await CuadreDiario.find({
-      'date.fecha': datePrincipal,
+      date: {
+        $gte: startOfDay,
+        $lte: endOfDay,
+      },
     }).lean();
 
     listCuadres = await obtenerInformacionDetallada(listCuadres);
-    if (lastCuadre !== null) {
-      const [infoDetailLastCuadre] = await obtenerInformacionDetallada([lastCuadre]);
-      lastCuadre = infoDetailLastCuadre;
+    if (lastCuadreByTypeSaved !== null) {
+      const [infoDetailLastCuadre] = await obtenerInformacionDetallada([lastCuadreByTypeSaved]);
+      lastCuadreByTypeSaved = infoDetailLastCuadre;
     }
+
+    // Obtener la información del usuario y su rol
+    const usuario = await Usuario.findById(idUsuario, 'rol name').lean();
 
     const dPrincipal = moment(datePrincipal, 'YYYY-MM-DD');
 
     // 3. Agregar atributo 'enable' a cada elemento de listCuadres.
-    if (listCuadres.length > 0 && lastCuadre) {
-      const dLastCuadre = moment(lastCuadre.date.fecha, 'YYYY-MM-DD');
+    if (listCuadres.length > 0) {
+      const uCuadre = typeSavedOnCuadre === 'user' && lastCuadreByTypeSaved ? lastCuadreByTypeSaved : ultimoCuadre;
+      const dLastCuadre = moment(uCuadre.date, 'YYYY-MM-DD');
+
       listCuadres = listCuadres.map((elemento) => {
         if (
-          dPrincipal.isSame(dLastCuadre) &&
-          elemento._id === lastCuadre._id &&
-          elemento.infoUser._id === lastCuadre.infoUser._id
+          dPrincipal.isSame(dLastCuadre, 'day') &&
+          elemento._id.toString() === uCuadre._id.toString() &&
+          elemento.savedInNameOf.idUsuario === idUsuario &&
+          elemento.tipoGuardado === typeSavedOnCuadre
         ) {
-          return { ...elemento, type: 'update', enable: false, saved: true };
+          return {
+            ...elemento,
+            type: usuario ? 'update' : 'view',
+            isRemovable: true,
+            enable: usuario ? false : true,
+            saved: true,
+          };
         } else {
-          return { ...elemento, type: 'view', enable: true, saved: true };
+          return { ...elemento, type: 'view', isRemovable: false, enable: true, saved: true };
         }
       });
     }
 
     const infoBase = {
-      date: {
-        fecha: datePrincipal,
-        hora: '',
-      },
+      date: moment(datePrincipal).toDate(),
       cajaInicial: 0,
+      suggestion: {
+        estado: false,
+        info: null,
+      },
+      incuerencia: false,
       Montos: [],
-      totalCaja: '',
       estado: '',
-      margenError: '',
+      margenError: 0,
       corte: 0,
       cajaFinal: 0,
       ingresos: {
@@ -292,63 +350,198 @@ router.get('/get-cuadre/:idUsuario/:datePrincipal', async (req, res) => {
         transferencia: '',
         tarjeta: '',
       },
-      egresos: {
-        gastos: '',
-      },
+      egresos: 0,
       notas: [],
-      infoUser: await handleGetInfoUser(idUsuario),
       Pagos: [],
       Gastos: [],
+      savedBy: {
+        idUsuario: idUsuario,
+        nombre: usuario ? usuario.name : 'Desconocido',
+      },
+      savedInNameOf: {
+        idUsuario: idUsuario,
+        nombre: usuario ? usuario.name : 'Desconocido',
+      },
+      tipoGuardado: typeSavedOnCuadre,
     };
 
     let cuadreActual = infoBase;
 
-    if (lastCuadre) {
-      const dLastCuadre = moment(lastCuadre.date.fecha, 'YYYY-MM-DD');
-      // =
-      if (dPrincipal.isSame(dLastCuadre)) {
-        if (idUsuario === lastCuadre.infoUser._id.toString()) {
-          cuadreActual = {
-            ...lastCuadre,
-            type: 'update',
-            enable: false,
-            saved: true,
-          };
-        } else {
+    if (ultimoCuadre) {
+      const dLastCuadre = moment(ultimoCuadre.date, 'YYYY-MM-DD');
+      if (lastCuadreByTypeSaved) {
+        if (dPrincipal.isSame(dLastCuadre, 'day')) {
+          console.log('=');
+          // =
+          const date = moment(lastCuadreByTypeSaved.date, 'YYYY-MM-DD');
+          if (dPrincipal.isSame(date, 'day')) {
+            if (lastCuadreByTypeSaved.tipoGuardado === typeSavedOnCuadre) {
+              if (idUsuario === lastCuadreByTypeSaved.savedInNameOf.idUsuario.toString()) {
+                cuadreActual = {
+                  ...lastCuadreByTypeSaved,
+                  type: usuario ? 'update' : 'view',
+                  isRemovable: true,
+                  enable: usuario ? false : true,
+                  saved: true,
+                };
+              } else {
+                cuadreActual = {
+                  ...cuadreActual,
+                  suggestion: {
+                    estado: true,
+                    info: {
+                      idCuadre: lastCuadreByTypeSaved._id,
+                      cajaInicialSugerida: lastCuadreByTypeSaved.cajaFinal,
+                      fechaCuadre: lastCuadreByTypeSaved.date,
+                      responsable: lastCuadreByTypeSaved.savedInNameOf.nombre,
+                    },
+                  },
+                  cajaInicial: lastCuadreByTypeSaved.cajaFinal,
+                  type: 'new',
+                  isRemovable: false,
+                  enable: false,
+                  saved: false,
+                };
+              }
+            } else {
+              cuadreActual = {
+                ...cuadreActual,
+                type: 'new',
+                isRemovable: false,
+                enable: false,
+                saved: false,
+              };
+            }
+          } else {
+            // <
+            if (lastCuadreByTypeSaved.tipoGuardado === typeSavedOnCuadre) {
+              cuadreActual = {
+                ...cuadreActual,
+                suggestion: {
+                  estado: true,
+                  info: {
+                    idCuadre: lastCuadreByTypeSaved._id,
+                    cajaInicialSugerida: lastCuadreByTypeSaved.cajaFinal,
+                    fechaCuadre: lastCuadreByTypeSaved.date,
+                    responsable: lastCuadreByTypeSaved.savedInNameOf.nombre,
+                  },
+                },
+                cajaInicial: lastCuadreByTypeSaved.cajaFinal,
+                type: 'new',
+                isRemovable: false,
+                enable: false,
+                saved: false,
+              };
+            } else {
+              cuadreActual = {
+                ...cuadreActual,
+                type: 'new',
+                isRemovable: false,
+                enable: false,
+                saved: false,
+              };
+            }
+          }
+        } else if (dPrincipal.isBefore(dLastCuadre, 'day')) {
+          console.log('<');
+          // <
+          if (listCuadres.length > 0) {
+            const lastCuadreOfList = listCuadres[listCuadres.length - 1];
+            //   if (typeSavedOnCuadre === 'user') {
+            if (typeSavedOnCuadre === lastCuadreByTypeSaved.tipoGuardado) {
+              const isSameUserAndCuadre =
+                lastCuadreByTypeSaved.savedInNameOf.idUsuario.toString() ===
+                  lastCuadreOfList.savedInNameOf.idUsuario.toString() &&
+                lastCuadreByTypeSaved._id.toString() === lastCuadreOfList._id;
+
+              cuadreActual = {
+                ...lastCuadreOfList,
+                type: isSameUserAndCuadre && usuario ? 'update' : 'view',
+                isRemovable: isSameUserAndCuadre ? true : false,
+                enable: isSameUserAndCuadre && usuario ? false : true,
+                saved: true,
+              };
+            } else {
+              cuadreActual = {
+                ...lastCuadreOfList,
+                type: 'view',
+                isRemovable: false,
+                enable: true,
+                saved: true,
+              };
+            }
+          } else {
+            cuadreActual = {
+              ...cuadreActual,
+              type: 'view',
+              isRemovable: false,
+              enable: true,
+              saved: false,
+            };
+          }
+        } else if (dPrincipal.isAfter(dLastCuadre, 'day')) {
+          console.log('>');
+          // >
+          if (ultimoCuadre.tipoGuardado === typeSavedOnCuadre) {
+            cuadreActual = {
+              ...cuadreActual,
+              cajaInicial: lastCuadreByTypeSaved.cajaFinal,
+              suggestion: {
+                estado: true,
+                info: {
+                  idCuadre: lastCuadreByTypeSaved._id,
+                  cajaInicialSugerida: lastCuadreByTypeSaved.cajaFinal,
+                  fechaCuadre: lastCuadreByTypeSaved.date,
+                  responsable: lastCuadreByTypeSaved.savedInNameOf.nombre,
+                },
+              },
+              type: 'new',
+              isRemovable: false,
+              enable: false,
+              saved: false,
+            };
+          } else {
+            cuadreActual = {
+              ...cuadreActual,
+              type: 'new',
+              isRemovable: false,
+              enable: false,
+              saved: false,
+            };
+          }
+        }
+      } else {
+        if (dPrincipal.isSameOrAfter(dLastCuadre, 'day')) {
+          console.log('>=');
+          // >=
           cuadreActual = {
             ...cuadreActual,
-            cajaInicial: lastCuadre.cajaFinal,
             type: 'new',
+            isRemovable: false,
             enable: false,
             saved: false,
           };
-        }
-      } else if (dPrincipal.isBefore(dLastCuadre)) {
-        // <
-        if (listCuadres.length > 0) {
-          cuadreActual = {
-            ...listCuadres[listCuadres.length - 1],
-            type: 'view',
-            enable: true,
-            saved: true,
-          };
         } else {
-          cuadreActual = {
-            ...cuadreActual,
-            type: 'view',
-            enable: true,
-            saved: false,
-          };
+          console.log('<');
+          // <
+          if (listCuadres.length > 0) {
+            cuadreActual = {
+              ...listCuadres[listCuadres.length - 1],
+              type: 'view',
+              isRemovable: false,
+              enable: true,
+              saved: true,
+            };
+          } else {
+            cuadreActual = {
+              ...cuadreActual,
+              type: 'view',
+              isRemovable: false,
+              enable: true,
+              saved: false,
+            };
+          }
         }
-      } else if (dPrincipal.isAfter(dLastCuadre)) {
-        // >
-        cuadreActual = {
-          ...cuadreActual,
-          cajaInicial: lastCuadre.cajaFinal,
-          type: 'new',
-          enable: false,
-          saved: false,
-        };
       }
     }
 
@@ -357,13 +550,21 @@ router.get('/get-cuadre/:idUsuario/:datePrincipal', async (req, res) => {
     let { pagosNCuadre, gastosNCuadre } = MovimientosNCuadre;
 
     res.json({
-      listCuadres: listCuadres ? listCuadres : [],
-      lastCuadre: lastCuadre ? { ...lastCuadre, type: 'update', enable: false, saved: true } : null,
+      listCuadres: listCuadres.length > 0 ? listCuadres : [],
+      lastCuadre: lastCuadreByTypeSaved
+        ? {
+            ...lastCuadreByTypeSaved,
+            type: usuario ? 'update' : 'view',
+            isRemovable: true,
+            enable: usuario ? false : true,
+            saved: true,
+          }
+        : null,
       cuadreActual: cuadreActual,
       infoBase,
       registroNoCuadrados: {
-        pagos: pagosNCuadre.length ? pagosNCuadre : [],
-        gastos: gastosNCuadre.length ? gastosNCuadre : [],
+        pagos: pagosNCuadre.length > 0 ? pagosNCuadre : [],
+        gastos: gastosNCuadre.length > 0 ? gastosNCuadre : [],
       },
     });
   } catch (error) {
@@ -372,6 +573,7 @@ router.get('/get-cuadre/:idUsuario/:datePrincipal', async (req, res) => {
   }
 });
 
+// Función optimizada para obtener la lista de fechas de un mes
 const handleGetListFechas = (date) => {
   const fechas = [];
   // Convertir la cadena de fecha en un objeto moment para la fecha de entrada
@@ -408,86 +610,164 @@ const handleGetListFechas = (date) => {
 router.get('/get-list-cuadre/mensual/:date', async (req, res) => {
   try {
     const { date } = req.params;
-    // Genera la lista de fechas para el mes dado
     const listaFechas = handleGetListFechas(date);
 
+    // Definir el rango del mes en UTC
+    const startOfMonth = moment(date, 'YYYY-MM-DD').startOf('month').toDate();
+    const endOfMonth = moment(date, 'YYYY-MM-DD').endOf('month').toDate();
+
+    // Obtener los cuadres mensuales dentro del rango
+    const cuadresMensuales = await CuadreDiario.find({
+      date: { $gte: startOfMonth, $lte: endOfMonth },
+    }).lean();
+
+    // Mapear los cuadres a un objeto con clave YYYY-MM-DD
+    const cuadresMap = cuadresMensuales.reduce((acc, item) => {
+      const fechaKey = moment(item.date).format('YYYY-MM-DD'); // Corrige el acceso a item.date
+      if (!acc[fechaKey]) acc[fechaKey] = [];
+      acc[fechaKey].push(item);
+      return acc;
+    }, {});
+
+    // Procesar los resultados por cada fecha de listaFechas
     const resultadosPorFecha = await Promise.all(
       listaFechas.map(async (fecha) => {
-        // Para cada fecha, obtener la estructura nueva y los cuadres diarios
-        const cuadreDiarios = await CuadreDiario.find({ 'date.fecha': fecha });
+        const cuadreDiarios = cuadresMap[fecha] || [];
+
         const listCuadres = await obtenerInformacionDetallada(cuadreDiarios);
-        const MontoNCuadrados = await handleGetMovimientosNCuadre(fecha, listCuadres);
-        const { pagosNCuadre, gastosNCuadre } = MontoNCuadrados;
-        const paysNCuadrados = pagosNCuadre;
-        const gastoGeneral = gastosNCuadre;
+        const { pagosNCuadre, gastosNCuadre } = await handleGetMovimientosNCuadre(fecha, listCuadres);
 
-        // Procesar cada cuadre diario para esa fecha
-        const cuadresTransformados = await Promise.all(
-          cuadreDiarios.map(async (cuadre) => {
-            // Sumar los montos de cada cuadre
-            const sumaMontos = cuadre.Montos.reduce((total, monto) => total + +monto.total, 0);
-            const montoCaja = sumaMontos.toFixed(1).toString();
-
-            // Remover el atributo Montos
-            delete cuadre.Montos;
-
-            // Agregar montoCaja
-            cuadre.montoCaja = montoCaja;
-
-            // Retornar solo los campos deseados
-            return {
-              _id: cuadre._id,
-              cajaInicial: cuadre.cajaInicial,
-              montoCaja,
-              estado: cuadre.estado,
-              margenError: cuadre.margenError,
-              corte: cuadre.corte,
-              cajaFinal: cuadre.cajaFinal,
-              ingresos: cuadre.ingresos,
-              egresos: cuadre.egresos,
-              notas: cuadre.notas,
-              infoUser: cuadre.infoUser,
-            };
-          })
-        );
+        const cuadresTransformados = cuadreDiarios.map((cuadre) => ({
+          _id: cuadre._id,
+          cajaInicial: cuadre.cajaInicial,
+          montoCaja: cuadre.Montos.reduce((total, monto) => total + +monto.total, 0).toFixed(1),
+          estado: cuadre.estado,
+          margenError: cuadre.margenError,
+          corte: cuadre.corte,
+          cajaFinal: cuadre.cajaFinal,
+          ingresos: cuadre.ingresos,
+          egresos: cuadre.egresos,
+          notas: cuadre.notas,
+          infoUser: cuadre.savedInNameOf.nombre,
+          suggestion: cuadre.suggestion,
+          incuerencia: cuadre.incuerencia,
+        }));
 
         return {
           fecha,
           cuadresTransformados,
-          paysNCuadrados,
-          gastoGeneral,
+          paysNCuadrados: pagosNCuadre,
+          gastoGeneral: gastosNCuadre,
         };
       })
     );
 
     res.json(resultadosPorFecha);
   } catch (error) {
-    console.error(error);
+    console.error('Error en la API:', error);
+    res.status(500).json({ error: 'Error en el servidor', mensaje: error.message });
+  }
+});
+
+router.get('/get-movimientos-saved/cuadre/:date', async (req, res) => {
+  try {
+    const { date } = req.params;
+
+    // Convertir la fecha a rango (inicio y fin del día)
+    const startOfDay = moment(date).startOf('day').toDate();
+    const endOfDay = moment(date).endOf('day').toDate();
+
+    // Buscar documentos en el rango de fecha
+    const cuadreDiarios = await CuadreDiario.find(
+      { date: { $gte: startOfDay, $lte: endOfDay } },
+      { Pagos: 1, Gastos: 1, _id: 0 } // Proyectar solo Pagos y Gastos
+    );
+
+    // Unir todos los pagos y gastos
+    const Pagos = cuadreDiarios.flatMap((doc) => doc.Pagos || []);
+    const Gastos = cuadreDiarios.flatMap((doc) => doc.Gastos || []);
+
+    res.json({ Pagos, Gastos });
+  } catch (error) {
+    console.error('Error en /get-pagos/cuadre:', error);
     res.status(500).send('Error en el servidor: ' + error.message);
   }
 });
 
-router.get('/get-pagos/cuadre/:date', async (req, res) => {
+router.get('/get-cuadres/grouped-by-user/:date', async (req, res) => {
   try {
     const { date } = req.params;
 
-    // Buscar documentos por fecha y proyectar solo el campo Pagos
-    const cuadreDiarios = await CuadreDiario.find(
-      { 'date.fecha': date },
-      { Pagos: 1, Gastos: 1, _id: 0 } // Proyectar solo el campo Pagos
-    );
+    // Generar rango de fechas
+    const startOfDay = moment(date).startOf('day').toDate();
+    const endOfDay = moment(date).endOf('day').toDate();
 
-    // Extraer y juntar todos los pagos
-    const Pagos = cuadreDiarios.reduce((acc, doc) => {
-      return acc.concat(doc.Pagos);
-    }, []);
-    // Extraer y juntar todos los pagos
-    const Gastos = cuadreDiarios.reduce((acc, doc) => {
-      return acc.concat(doc.Gastos);
+    // Obtener los cuadres del día
+    const cuadres = await CuadreDiario.find({
+      date: { $gte: startOfDay, $lte: endOfDay },
+    }).lean();
+
+    // Si no hay cuadres, retornar un array vacío
+    if (!cuadres.length) {
+      return res.json([]);
+    }
+
+    const infoNegocio = await Negocio.findOne({}, { typeSavedOnCuadre: 1 }).lean();
+    if (!infoNegocio) {
+      return res.status(404).json({ message: 'Hubo un error al traer información del negocio' });
+    }
+
+    const { typeSavedOnCuadre } = infoNegocio;
+
+    // Obtener todos los usuarios únicos
+    const usuariosUnicos = Array.from(new Set(cuadres.map((cuadre) => cuadre.savedInNameOf.idUsuario)));
+
+    // Determinar el último cuadre por tipo
+    let lastCuadresByType = {};
+    if (typeSavedOnCuadre === 'last') {
+      const lastCuadre = await CuadreDiario.findOne().sort({ date: -1 }).lean();
+      if (lastCuadre) {
+        lastCuadresByType[lastCuadre._id] = true;
+      }
+    } else if (typeSavedOnCuadre === 'user') {
+      for (const idUsuario of usuariosUnicos) {
+        const lastCuadre = await CuadreDiario.findOne({
+          'savedInNameOf.idUsuario': idUsuario,
+        })
+          .sort({ date: -1 })
+          .lean();
+        if (lastCuadre) {
+          lastCuadresByType[lastCuadre._id] = true;
+        }
+      }
+    }
+
+    // Mapear los datos finales
+    const datos = cuadres.reduce((acc, cuadre) => {
+      const { idUsuario, nombre } = cuadre.savedInNameOf;
+
+      // Buscar o crear entrada para el usuario
+      let usuario = acc.find((item) => item.idUsuario === idUsuario);
+      if (!usuario) {
+        usuario = {
+          idUsuario,
+          nombre,
+          listCuadres: [],
+        };
+        acc.push(usuario);
+      }
+
+      // Agregar el cuadre con la información `isLast`
+      usuario.listCuadres.push({
+        idCuadre: cuadre._id,
+        date: moment(cuadre.date).format('YYYY-MM-DD - h:mm a'),
+        isLast: !!lastCuadresByType[cuadre._id],
+      });
+
+      return acc;
     }, []);
 
-    // Enviar la respuesta con todos los pagos unidos
-    res.json({ Pagos, Gastos });
+    res.json(datos);
   } catch (error) {
     console.error(error);
     res.status(500).send('Error en el servidor: ' + error.message);

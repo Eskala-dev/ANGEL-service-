@@ -56,6 +56,39 @@ export const handleGetInfoDelivery = async () => {
   }
 };
 
+export const handleGetInfoOtros = async () => {
+  try {
+    // Consulta a la colección categorias
+    const categoria = await Categoria.findOne({
+      name: 'Unico',
+      nivel: 'primario',
+    });
+
+    // Verifica si se encontró la categoría
+    if (!categoria) {
+      return null;
+    }
+
+    // Obtiene el _id de la categoría encontrada
+    const categoriaId = categoria._id;
+
+    // Consulta a la colección Servicio
+    const servicio = await Servicio.findOne({
+      idCategoria: categoriaId,
+      nombre: 'Otros',
+    });
+
+    // Verifica si se encontró el servicio
+    if (!servicio) {
+      return null;
+    }
+
+    return servicio;
+  } catch (error) {
+    console.error('Error al buscar el servicio:', error);
+  }
+};
+
 export const GetAnuladoId = async (id) => {
   try {
     // Buscar el documento por su ID

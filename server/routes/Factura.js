@@ -9,12 +9,11 @@ import db from '../config/db.js';
 import moment from 'moment';
 import Anular from '../models/anular.js';
 import Almacen from '../models/almacen.js';
-import Servicio from '../models/portafolio/servicios.js';
 import Producto from '../models/portafolio/productos/productos.js';
 
 import Pagos from '../models/pagos.js';
 
-import { handleGetInfoDelivery, mapArrayByKey, mapObjectByKey, currentDate } from '../utils/utilsFuncion.js';
+import { mapArrayByKey, mapObjectByKey, currentDate } from '../utils/utilsFuncion.js';
 import { handleAddPago } from './pagos.js';
 import { handleAddGasto } from './gastos.js';
 import Usuarios from '../models/usuarios/usuarios.js';
@@ -201,6 +200,7 @@ async function handleAddFactura(data, session) {
     delivery,
     Nombre,
     idCliente: infoCliente ? infoCliente.data._id : idCliente,
+    stateLavado: 'inProgress',
     Items,
     celular,
     direccion,
@@ -225,7 +225,6 @@ async function handleAddFactura(data, session) {
   newOrden = await nuevoOrden.save({ session });
   newOrden = newOrden.toObject();
 
-  let newsMovimientos = [];
   if (infoProductos.length > 0 && modeRegistro === 'nuevo') {
     const listNewsMovimientos = infoProductos.map((ipro) => {
       return {
@@ -240,9 +239,7 @@ async function handleAddFactura(data, session) {
       };
     });
 
-    const movimientosAgregados = await MovimientoProducto.insertMany(listNewsMovimientos, { session });
-
-    newsMovimientos = movimientosAgregados.map((movimiento) => movimiento.toObject());
+    await MovimientoProducto.insertMany(listNewsMovimientos, { session });
   }
 
   let nuevoPago;
@@ -336,7 +333,6 @@ async function handleAddFactura(data, session) {
     infoCliente,
     newCodigo,
     productosUpdated,
-    newsMovimientos,
   };
 }
 
@@ -345,23 +341,46 @@ router.post('/add-factura', openingHours, async (req, res) => {
   session.startTransaction();
 
   try {
-    const result = await handleAddFactura(req.body, session);
-    const { newOrder, newPago, newGasto, infoCliente, newCodigo, productosUpdated, newsMovimientos } = result;
+    const { infoUser, ...resData } = req.body;
+
+    const result = await handleAddFactura(resData, session);
+    const { newOrder, newPago, newGasto, infoCliente, newCodigo, productosUpdated } = result;
 
     await session.commitTransaction();
 
     const socketId = req.headers['x-socket-id'];
-    emitToClients('service:updatedProductos', productosUpdated, socketId);
-    emitToClients('service:addNewsMovimientos', newsMovimientos, socketId);
+
+    productosUpdated.length > 0 && emitToClients('service:updatedProductos', productosUpdated);
+    newPago &&
+      emitToClients(
+        'server:cPago',
+        {
+          tipo: 'added',
+          info: {
+            ...newPago,
+            infoUser,
+          },
+        },
+        socketId
+      );
+    newGasto && emitToClients('server:cGasto', newGasto);
+    infoCliente && emitToClients('server:cClientes', infoCliente);
+    emitToClients('server:updateCodigo', newCodigo.codActual);
+    emitToClients(
+      'server:changeOrder',
+      {
+        tipo: 'add',
+        info: {
+          ...newOrder,
+          ListPago: newOrder.ListPago.map((pago) => ({ ...pago, infoUser })),
+        },
+      },
+      socketId
+    );
 
     res.json({
-      newOrder,
-      ...(newPago && { newPago }),
-      ...(newGasto && { newGasto }),
-      ...(infoCliente && { changeCliente: infoCliente }),
-      ...(newCodigo && { newCodigo: newCodigo.codActual }),
-      ...(productosUpdated.length > 0 && { productosUpdated }),
-      ...(newsMovimientos.length > 0 && { newsMovimientos }),
+      ...newOrder,
+      ListPago: newOrder.ListPago.map((pago) => ({ ...pago, infoUser })),
     });
   } catch (error) {
     console.error('Error al guardar los datos:', error);
@@ -525,154 +544,6 @@ router.get('/get-factura/date/:date', async (req, res) => {
   } catch (error) {
     console.error('Error al obtener datos: ', error);
     res.status(500).json({ mensaje: 'Error interno del servidor' });
-  }
-});
-
-const generateDateArray = (type, filter) => {
-  let fechas = [];
-
-  if (type === 'daily') {
-    const { days } = filter;
-    // Generar fechas para los próximos 3 días
-    fechas = Array.from({ length: days }, (_, index) =>
-      moment().startOf('day').add(index, 'days').format('YYYY-MM-DD')
-    );
-    return fechas;
-  } else {
-    if (type === 'monthly') {
-      const { date } = filter;
-      // Generar fechas para todo el mes
-      const firstDayOfMonth = moment(date).startOf('month');
-      const lastDayOfMonth = moment(date).endOf('month');
-
-      let currentDate = moment(firstDayOfMonth);
-      while (currentDate <= lastDayOfMonth) {
-        fechas.push(currentDate.format('YYYY-MM-DD'));
-        currentDate.add(1, 'day');
-      }
-      return fechas;
-    }
-  }
-};
-
-router.post('/get-report/date-prevista/:type', async (req, res) => {
-  try {
-    const { type } = req.params;
-    const filter = req.body;
-    const datesArray = generateDateArray(type, filter);
-    const infoReporte = [];
-
-    const infoNegocio = await Negocio.findOne();
-    const itemsReporte = infoNegocio.itemsInformeDiario;
-
-    const infoDelivery = await handleGetInfoDelivery();
-
-    itemsReporte.push({
-      order: itemsReporte.length,
-      id: `SER${infoDelivery._id.toString()}`,
-    });
-
-    const splitItem = itemsReporte.map((items) => {
-      return {
-        ID: items.id.substring(3),
-        TIPO: items.id.substring(0, 3),
-      };
-    });
-
-    let groupedResults = [];
-
-    // Recorremos cada elemento de splitItem
-    for (const item of splitItem) {
-      try {
-        let resultObject = {};
-        resultObject.idColumna = item.ID;
-
-        // Si los primeros caracteres son "CAT", busca en la colección categorias
-        if (item.TIPO === 'CAT') {
-          const servicios = await Servicio.find({ idCategoria: item.ID }, '_id');
-          const productos = await Producto.find({ idCategoria: item.ID }, '_id');
-
-          const idsServicios = servicios.map((servicio) => servicio._id.toString());
-          const idsProductos = productos.map((producto) => producto._id.toString());
-
-          // Combinamos los IDs de servicios y productos
-          resultObject.idsCantidades = [...idsServicios, ...idsProductos];
-        } else {
-          // Si no es "CAT", simplemente agregamos el ID al array
-          resultObject.idsCantidades = [item.ID];
-        }
-
-        // Agregamos el objeto al array de resultados
-        groupedResults.push(resultObject);
-      } catch (error) {
-        console.error('Error al buscar el documento:', error);
-      }
-    }
-
-    for (const datePrevista of datesArray) {
-      const startOfDay = moment(datePrevista).startOf('day').toDate();
-      const endOfDay = moment(datePrevista).endOf('day').toDate();
-
-      const facturas = await Factura.find({
-        datePrevista: {
-          $gte: startOfDay,
-          $lt: endOfDay,
-        },
-        estadoPrenda: { $nin: ['anulado', 'donado'] },
-      });
-      const resultado = {
-        FechaPrevista: datePrevista,
-        CantidadPedido: facturas.length,
-        InfoItems: {},
-      };
-
-      // Utiliza Promise.all para esperar a que se completen todas las operaciones asíncronas antes de continuar
-      await Promise.all(
-        facturas.map(async (factura) => {
-          // Recorremos cada factura
-          await Promise.all(
-            factura.Items.map(async (order) => {
-              // Recorremos cada item de la factura
-
-              for (const item of groupedResults) {
-                // Verificamos si el identificador está en los idsCantidades de cada grupo
-                if (item.idsCantidades.includes(order.identificador)) {
-                  // Verificar si resultado.InfoItems[item.idColumna] es un número
-                  const existingValue = parseFloat(resultado.InfoItems[item.idColumna]) || 0;
-                  // Sumar el valor existente con la cantidad de la orden y formatearlo a 2 decimales
-                  resultado.InfoItems[item.idColumna] = (existingValue + Number(order.cantidad)).toFixed(2);
-                }
-              }
-            })
-          );
-        })
-      );
-
-      resultado.InfoItems = Object.entries(resultado.InfoItems).map(([identificador, Cantidad]) => ({
-        identificador,
-        Cantidad,
-      }));
-
-      groupedResults.forEach((group) => {
-        // Verifica si la idColumna ya existe en resultado.InfoItems
-        const existingItem = resultado.InfoItems.find((item) => item.identificador === group.idColumna);
-
-        if (!existingItem) {
-          // Si la idColumna no existe, agrega una nueva entrada con cantidad 0
-          resultado.InfoItems.push({
-            identificador: group.idColumna,
-            Cantidad: 0,
-          });
-        }
-      });
-
-      infoReporte.push(resultado);
-    }
-
-    res.json(infoReporte);
-  } catch (error) {
-    console.error('Error al obtener los datos:', error);
-    res.status(500).json({ mensaje: 'Error al obtener los datos' });
   }
 });
 
@@ -992,7 +863,7 @@ router.put('/update-factura/simple-info/:id', async (req, res) => {
       isNewCliente,
       delivery,
       idCliente,
-      infoRecepcion,
+      datePrevista,
       Nombre,
       direccion,
       celular,
@@ -1037,7 +908,7 @@ router.put('/update-factura/simple-info/:id', async (req, res) => {
           idCliente: idClienteToUpdate,
           Nombre,
           direccion,
-          infoRecepcion,
+          datePrevista,
           celular,
           dni,
           Items,
@@ -1056,7 +927,7 @@ router.put('/update-factura/simple-info/:id', async (req, res) => {
           idCliente: 1,
           Nombre: 1,
           direccion: 1,
-          infoRecepcion: 1,
+          datePrevista: 1,
           celular: 1,
           dni: 1,
           Items: 1,
@@ -1172,6 +1043,7 @@ router.put('/update-factura/entregar/:id', async (req, res) => {
       facturaId,
       {
         $set: {
+          stateLavado: 'ready',
           estadoPrenda: 'entregado',
           location: 1,
           infoEntrega: infoEntrega,
@@ -1185,6 +1057,7 @@ router.put('/update-factura/entregar/:id', async (req, res) => {
           codRecibo: 1,
           infoEntrega: 1,
           totalNeto: 1,
+          stateLavado: 1,
           estadoPrenda: 1,
           location: 1,
           infoRecepcion: 1,
@@ -1248,6 +1121,7 @@ router.put('/update-factura/entregar/:id', async (req, res) => {
         estadoPrenda: orderUpdated.estadoPrenda,
         location: orderUpdated.location,
         infoEntrega: orderUpdated.infoEntrega,
+        stateLavado: orderUpdated.stateLavado,
       },
       ...(newGasto && { newGasto }),
       ...(infoCliente && { changeCliente: infoCliente }),
@@ -1363,12 +1237,30 @@ router.put('/update-factura/anular/:id', async (req, res) => {
 
   try {
     const { id: facturaId } = req.params;
-    const { infoAnulacion } = req.body;
+    const { infoAnulacion, pagosToDelete } = req.body;
+
+    const pagosEliminados = [];
+
+    for (const idPago of pagosToDelete) {
+      const pagoEliminado = await Pagos.findByIdAndDelete(idPago, { session });
+
+      if (pagoEliminado) {
+        pagosEliminados.push(pagoEliminado._id);
+      } else {
+        await session.abortTransaction();
+        session.endSession();
+        return res
+          .status(404)
+          .json({ mensaje: `Error: No se pudo eliminar el pago ${idPago} mientras se anulaba la factura` });
+      }
+    }
 
     const orderUpdated = await Factura.findByIdAndUpdate(
       facturaId,
       {
         estadoPrenda: 'anulado',
+        stateLavado: 'cancelled',
+        $pull: { listPago: { $in: pagosEliminados } },
       },
       {
         new: true,
@@ -1376,6 +1268,8 @@ router.put('/update-factura/anular/:id', async (req, res) => {
         fields: {
           codRecibo: 1,
           estadoPrenda: 1,
+          stateLavado: 1,
+          listPago: 1,
           idCliente: 1,
           descuento: 1,
           Items: 1,
@@ -1397,7 +1291,6 @@ router.put('/update-factura/anular/:id', async (req, res) => {
     );
 
     let productosUpdated = [];
-    let newsMovimientos = [];
 
     if (infoProductos.length > 0 && orderUpdated.modeRegistro === 'nuevo') {
       // Obtener los identificadores de los productos agrupados
@@ -1451,9 +1344,7 @@ router.put('/update-factura/anular/:id', async (req, res) => {
             };
           });
 
-        const movimientosAgregados = await MovimientoProducto.insertMany(listNewsMovimientos, { session });
-
-        newsMovimientos = movimientosAgregados.map((movimiento) => movimiento.toObject());
+        await MovimientoProducto.insertMany(listNewsMovimientos, { session });
       }
     }
 
@@ -1518,18 +1409,28 @@ router.put('/update-factura/anular/:id', async (req, res) => {
     await session.commitTransaction();
 
     const socketId = req.headers['x-socket-id'];
-    emitToClients('service:updatedProductos', productosUpdated, socketId);
-    emitToClients('service:addNewsMovimientos', newsMovimientos, socketId);
-
-    res.json({
-      orderAnulado: {
-        _id: orderUpdated._id,
-        estadoPrenda: orderUpdated.estadoPrenda,
-      },
-      ...(productosUpdated.length > 0 && { productosUpdated }),
-      ...(newsMovimientos.length > 0 && { newsMovimientos }),
-      ...(infoCliente && { changeCliente: infoCliente }),
+    pagosEliminados.map((idPagoDeleted) => {
+      emitToClients('server:cPago', {
+        tipo: 'deleted',
+        info: {
+          _id: idPagoDeleted,
+          idOrden: facturaId,
+        },
+      });
     });
+    productosUpdated.length > 0 && emitToClients('service:updatedProductos', productosUpdated);
+    infoCliente && emitToClients('server:cClientes', infoCliente);
+
+    const orderAnulado = {
+      _id: orderUpdated._id,
+      estadoPrenda: orderUpdated.estadoPrenda,
+      stateLavado: orderUpdated.stateLavado,
+      listPago: orderUpdated.listPago,
+    };
+
+    emitToClients('server:updateOrder(ANULACION)', orderAnulado, socketId);
+
+    res.json(orderAnulado);
   } catch (error) {
     await session.abortTransaction();
     console.error(error);
@@ -1570,7 +1471,7 @@ router.post('/anular-to-replace', async (req, res) => {
   const session = await db.startSession();
   session.startTransaction();
 
-  const { dataToNewOrden, dataToAnular } = req.body;
+  const { dataToNewOrden, dataToAnular, pagosToDelete, infoUser } = req.body;
 
   try {
     const { idOrden, infoAnulacion } = dataToAnular;
@@ -1578,10 +1479,28 @@ router.post('/anular-to-replace', async (req, res) => {
     const nuevaAnulacion = new Anular(infoAnulacion);
     await nuevaAnulacion.save({ session });
 
+    const pagosEliminados = [];
+
+    for (const idPago of pagosToDelete) {
+      const pagoEliminado = await Pagos.findByIdAndDelete(idPago, { session });
+
+      if (pagoEliminado) {
+        pagosEliminados.push(pagoEliminado._id);
+      } else {
+        await session.abortTransaction();
+        session.endSession();
+        return res
+          .status(404)
+          .json({ mensaje: `Error: No se pudo eliminar el pago ${idPago} mientras se anulaba la factura` });
+      }
+    }
+
     const orderAnulada = await Factura.findByIdAndUpdate(
       idOrden,
       {
         estadoPrenda: 'anulado',
+        stateLavado: 'cancelled',
+        $pull: { listPago: { $in: pagosEliminados } },
       },
       {
         new: true,
@@ -1589,6 +1508,8 @@ router.post('/anular-to-replace', async (req, res) => {
         fields: {
           codRecibo: 1,
           estadoPrenda: 1,
+          stateLavado: 1,
+          listPago: 1,
           idCliente: 1,
           descuento: 1,
           Items: 1,
@@ -1610,7 +1531,6 @@ router.post('/anular-to-replace', async (req, res) => {
     );
 
     let productosUpdatedBase = [];
-    let newsMovimientosBase = [];
 
     if (infoProductos.length > 0 && orderAnulada.modeRegistro === 'nuevo') {
       // Obtener los identificadores de los productos agrupados
@@ -1664,9 +1584,7 @@ router.post('/anular-to-replace', async (req, res) => {
             };
           });
 
-        const movimientosAgregados = await MovimientoProducto.insertMany(listNewsMovimientos, { session });
-
-        productosUpdatedBase = movimientosAgregados.map((movimiento) => movimiento.toObject());
+        await MovimientoProducto.insertMany(listNewsMovimientos, { session });
       }
     }
 
@@ -1729,7 +1647,7 @@ router.post('/anular-to-replace', async (req, res) => {
 
     const result = await handleAddFactura(dataToNewOrden, session);
 
-    const { newOrder, newPago, newGasto, infoCliente, newCodigo, productosUpdated, newsMovimientos } = result;
+    const { newOrder, newPago, newGasto, infoCliente, newCodigo, productosUpdated } = result;
 
     await session.commitTransaction();
 
@@ -1738,24 +1656,60 @@ router.post('/anular-to-replace', async (req, res) => {
     }
 
     productosUpdatedBase = [...productosUpdatedBase, ...productosUpdated];
-    newsMovimientosBase = [...newsMovimientosBase, ...newsMovimientos];
+
+    pagosEliminados.map((idPagoDeleted) => {
+      emitToClients('server:cPago', {
+        tipo: 'deleted',
+        info: {
+          _id: idPagoDeleted,
+          idOrden: idOrden,
+        },
+      });
+    });
 
     const socketId = req.headers['x-socket-id'];
-    emitToClients('service:updatedProductos', productosUpdated, socketId);
-    emitToClients('service:addNewsMovimientos', newsMovimientos, socketId);
+
+    productosUpdatedBase.length > 0 && emitToClients('service:updatedProductos', productosUpdatedBase);
+    newPago &&
+      emitToClients(
+        'server:cPago',
+        {
+          tipo: 'added',
+          info: {
+            ...newPago,
+            infoUser,
+          },
+        },
+        socketId
+      );
+    newGasto && emitToClients('server:cGasto', newGasto);
+    listChangeCliente.map((changeCliente) => {
+      emitToClients('server:cClientes', changeCliente);
+    });
+    emitToClients('server:updateCodigo', newCodigo.codActual);
+
+    emitToClients(
+      'server:changeOrder',
+      {
+        tipo: 'add',
+        info: {
+          ...newOrder,
+          ListPago: newOrder.ListPago.map((pago) => ({ ...pago, infoUser })),
+        },
+      },
+      socketId
+    );
+
+    emitToClients('server:updateOrder(ANULACION)', {
+      _id: orderAnulada._id,
+      estadoPrenda: orderAnulada.estadoPrenda,
+      stateLavado: orderAnulada.stateLavado,
+      listPago: orderAnulada.listPago,
+    });
 
     res.json({
-      orderAnulado: {
-        _id: orderAnulada._id,
-        estadoPrenda: orderAnulada.estadoPrenda,
-      },
-      newOrder,
-      ...(newPago && { newPago }),
-      ...(newGasto && { newGasto }),
-      ...(listChangeCliente.length > 0 && { listChangeCliente }),
-      ...(newCodigo && { newCodigo: newCodigo.codActual }),
-      ...(productosUpdated.length > 0 && { productosUpdated }),
-      ...(newsMovimientos.length > 0 && { newsMovimientos }),
+      ...newOrder,
+      ListPago: newOrder.ListPago.map((pago) => ({ ...pago, infoUser })),
     });
   } catch (error) {
     console.error('Error al guardar los datos:', error);
@@ -1828,6 +1782,31 @@ router.post('/facturas-by-cliente', async (req, res) => {
   } catch (error) {
     console.error('Error al buscar facturas:', error);
     res.status(500).json({ mensaje: 'Error al buscar facturas', error: error.message });
+  }
+});
+
+router.post('/change-state-lavado/:idOrden/:newState', async (req, res) => {
+  const { idOrden, newState } = req.params;
+
+  if (newState !== 'inProgress' && newState !== 'ready') {
+    return res.status(400).send({ message: 'Estado inválido' });
+  }
+
+  try {
+    // Actualiza el estado de lavado directamente en la base de datos
+    const updatedFactura = await Factura.findByIdAndUpdate(idOrden, { stateLavado: newState }, { new: true });
+
+    const socketId = req.headers['x-socket-id'];
+    emitToClients('server:updateOrder(ESTADO_LAVADO)', updatedFactura, socketId);
+
+    if (!updatedFactura) {
+      return res.status(404).send({ message: 'Orden de servicio no encontrada' });
+    }
+
+    res.status(200).send(updatedFactura);
+  } catch (error) {
+    console.error(error);
+    res.status(500).send({ message: 'Error al actualizar el estado de lavado', error });
   }
 });
 

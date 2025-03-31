@@ -23,7 +23,7 @@ router.post('/add-pago', async (req, res) => {
   session.startTransaction();
 
   try {
-    const { idOrden, date, metodoPago, total, idUser, isCounted } = req.body;
+    const { idOrden, date, metodoPago, total, idUser, isCounted, detail } = req.body;
 
     // 1. Buscar `listPago` y `totalNeto` de la factura correspondiente al `idOrden`
     const factura = await Factura.findById(idOrden, 'listPago totalNeto').lean();
@@ -51,6 +51,7 @@ router.post('/add-pago', async (req, res) => {
       total,
       idUser,
       isCounted,
+      detail,
     });
 
     const pagoGuardado = await nuevoPago.save({ session });
@@ -79,17 +80,17 @@ router.put('/edit-pago/:idPago', async (req, res) => {
     const { idPago } = req.params;
 
     // Obtener los nuevos datos del cuerpo de la solicitud
-    const { idOrden, date, metodoPago, total, idUser } = req.body;
+    const { date, metodoPago, total, idUser, detail } = req.body;
 
     // Buscar el pago por su ID y actualizarlo con los nuevos datos
     const pagoActualizado = await Pagos.findByIdAndUpdate(
       idPago,
       {
-        idOrden,
         date,
         metodoPago,
         total,
         idUser,
+        detail,
       },
       { new: true } // Devuelve el pago actualizado después de la edición
     );
@@ -132,7 +133,6 @@ router.delete('/delete-pago/:idPago', async (req, res) => {
     res.json({
       _id: pagoEliminado._id,
       idOrden: pagoEliminado.idOrden,
-      isCounted: pagoEliminado.isCounted,
     });
   } catch (error) {
     console.error('Error al eliminar el pago:', error);

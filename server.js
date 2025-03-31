@@ -32,6 +32,9 @@ import asistenciaRoutes from './server/routes/personal/asistencia.js';
 import personalRoutes from './server/routes/personal/personal.js';
 import rolesPersonalRoutes from './server/routes/personal/rolPersonal.js';
 import movimientoProductoRoutes from './server/routes/portafolio/productos/movimientosProducto.js';
+import insumosRoutes from './server/routes/portafolio/insumos/insumos.js';
+import movimientoInsumoRoutes from './server/routes/portafolio/insumos/movimientosInsumo.js';
+import counterStockRoutes from './server/routes/portafolio/counterStock.js';
 
 import { timeZone } from './server/utils/varsGlobal.js';
 import moment from 'moment';
@@ -110,6 +113,12 @@ app.use('/api/lava-ya/', personalRoutes);
 app.use('/api/lava-ya/', rolesPersonalRoutes);
 // Movimiento de Producto
 app.use('/api/lava-ya/', movimientoProductoRoutes);
+// Insumos
+app.use('/api/lava-ya/', insumosRoutes);
+// Movimiento de Insumo
+app.use('/api/lava-ya/', movimientoInsumoRoutes);
+// Conteo de Stock de Portafolio
+app.use('/api/lava-ya/', counterStockRoutes);
 
 server.listen(PORT, () => {
   console.log('Server Iniciado en puerto: ' + PORT);

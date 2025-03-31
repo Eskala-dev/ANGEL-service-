@@ -479,7 +479,7 @@ router.put('/recover-password/:id', verifyCodigo, async (req, res) => {
 router.get('/get-list-users', async (req, res) => {
   try {
     const users = await Usuario.find({
-      nivel: { $ne: 'master' },
+      //   nivel: { $ne: 'master' },
       state: { $ne: 'eliminado' },
     });
     res.json(users);

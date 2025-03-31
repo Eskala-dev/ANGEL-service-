@@ -16,10 +16,10 @@ export const checkPuntosState = async () => {
 };
 
 router.post('/update-point-value', (req, res) => {
-  const { score, valor, useState } = req.body;
+  const { score, valor, useState, showPuntosByDefault } = req.body;
   // Encuentra y actualiza el único documento en la colección
   modelPuntos
-    .findOneAndUpdate({}, { score, valor, useState }, { new: true, upsert: true })
+    .findOneAndUpdate({}, { score, valor, useState, showPuntosByDefault }, { new: true, upsert: true })
     // "new: true" devuelve el documento actualizado, "upsert: true" crea uno si no existe
     .then((updatedValue) => {
       res.json(updatedValue);
@@ -40,6 +40,7 @@ router.get('/get-point-value', (req, res) => {
           score: '10',
           valor: '1',
           useState: false,
+          showPuntosByDefault: false,
         });
 
         return newInfoPuntos.save(); // Guarda el nuevo objeto en la base de datos

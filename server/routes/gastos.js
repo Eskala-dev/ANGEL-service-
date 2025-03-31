@@ -1,11 +1,11 @@
-import express from "express";
-import Gasto from "../models/gastos.js";
-import TipoGasto from "../models/tipoGastos.js";
-import { openingHours } from "../middleware/middleware.js";
-import { handleGetInfoUser } from "./cuadreDiario.js";
-import moment from "moment";
-import Usuarios from "../models/usuarios/usuarios.js";
-import { mapArrayByKey, mapObjectByKey } from "../utils/utilsFuncion.js";
+import express from 'express';
+import Gasto from '../models/gastos.js';
+import TipoGasto from '../models/tipoGastos.js';
+import { openingHours } from '../middleware/middleware.js';
+import { handleGetInfoUser } from './cuadreDiario.js';
+import moment from 'moment';
+import Usuarios from '../models/usuarios/usuarios.js';
+import { mapArrayByKey, mapObjectByKey } from '../utils/utilsFuncion.js';
 const router = express.Router();
 
 export const handleAddGasto = async (nuevoGasto) => {
@@ -18,25 +18,25 @@ export const handleAddGasto = async (nuevoGasto) => {
     const gastoS = gastoGuardado.toObject();
     // Devuelve el gasto guardado
     return {
-      tipo: "added",
+      tipo: 'added',
       info: {
         ...gastoS,
         infoUser: await handleGetInfoUser(gastoS.idUser),
       },
     };
   } catch (error) {
-    console.error("Error al agregar gasto:", error);
+    console.error('Error al agregar gasto:', error);
     throw error; // Puedes manejar el error según tus necesidades
   }
 };
 
-router.post("/add-gasto", openingHours, (req, res) => {
+router.post('/add-gasto', openingHours, (req, res) => {
   const { infoGasto } = req.body;
-  const { idTipoGasto, tipo, motivo, monto, idUser } = infoGasto;
+  const { idTipoGasto, tipo, motivo, monto, idUser, metodoGasto } = infoGasto;
 
   const date = {
-    fecha: moment().format("YYYY-MM-DD"),
-    hora: moment().format("HH:mm"),
+    fecha: moment().format('YYYY-MM-DD'),
+    hora: moment().format('HH:mm'),
   };
 
   const newGasto = new Gasto({
@@ -46,6 +46,7 @@ router.post("/add-gasto", openingHours, (req, res) => {
     date,
     monto,
     idUser,
+    metodoGasto,
   });
 
   newGasto
@@ -53,7 +54,7 @@ router.post("/add-gasto", openingHours, (req, res) => {
     .then(async (gastoSaved) => {
       const gastoS = gastoSaved.toObject();
       res.json({
-        tipo: "added",
+        tipo: 'added',
         info: {
           ...gastoS,
           infoUser: await handleGetInfoUser(gastoS.idUser),
@@ -61,23 +62,23 @@ router.post("/add-gasto", openingHours, (req, res) => {
       });
     })
     .catch((error) => {
-      console.error("Error al Guardar Delivery:", error);
-      res.status(500).json({ mensaje: "Error al Guardar Delivery" });
+      console.error('Error al Guardar Delivery:', error);
+      res.status(500).json({ mensaje: 'Error al Guardar Delivery' });
     });
 });
 
-router.get("/get-gastos/:fecha", async (req, res) => {
+router.get('/get-gastos/:fecha', async (req, res) => {
   try {
     const fecha = req.params.fecha;
 
     // Parsear la fecha usando Moment.js
-    const momentFecha = moment(fecha, "YYYY-MM-DD");
-    const inicioMes = moment(momentFecha).startOf("month").format("YYYY-MM-DD");
-    const finMes = moment(momentFecha).endOf("month").format("YYYY-MM-DD");
+    const momentFecha = moment(fecha, 'YYYY-MM-DD');
+    const inicioMes = moment(momentFecha).startOf('month').format('YYYY-MM-DD');
+    const finMes = moment(momentFecha).endOf('month').format('YYYY-MM-DD');
 
     // Consultar los gastos en el rango de fechas especificado
     const gastos = await Gasto.find({
-      "date.fecha": {
+      'date.fecha': {
         $gte: inicioMes,
         $lte: finMes,
       },
@@ -90,27 +91,22 @@ router.get("/get-gastos/:fecha", async (req, res) => {
     const tiposGastos = await TipoGasto.find();
 
     // Consultar la información de usuario solo para los IDs necesarios
-    const usuariosInfo = await Usuarios.find(
-      { _id: { $in: usuariosIds } },
-      { name: 1, rol: 1, usuario: 1 }
-    );
+    const usuariosInfo = await Usuarios.find({ _id: { $in: usuariosIds } }, { name: 1, rol: 1, usuario: 1 });
 
     // Convertir la información de usuario a un mapa para un acceso más eficiente
-    const usuariosMap = mapObjectByKey(usuariosInfo, "_id");
-    const gastosMap = mapArrayByKey(gastos, "idTipoGasto");
+    const usuariosMap = mapObjectByKey(usuariosInfo, '_id');
+    const gastosMap = mapArrayByKey(gastos, 'idTipoGasto');
 
     // Procesar los gastos y calcular los totales por tipo de gasto
     const tipoGastosArray = [];
     for (const tipoGasto of tiposGastos) {
       const gastosTipo = gastosMap[tipoGasto._id] || [];
-      const totalMonto = gastosTipo.reduce(
-        (total, gasto) => total + parseFloat(gasto.monto),
-        0
-      );
+      const totalMonto = gastosTipo.reduce((total, gasto) => total + parseFloat(gasto.monto), 0);
       const infoGastos = gastosTipo.map((gasto) => ({
         motivo: gasto.motivo,
         date: gasto.date,
         monto: parseFloat(gasto.monto),
+        metodoGasto: gasto.metodoGasto,
         infoUser: usuariosMap[gasto.idUser] || null,
       }));
       tipoGastosArray.push({
@@ -125,30 +121,30 @@ router.get("/get-gastos/:fecha", async (req, res) => {
     res.json(tipoGastosArray);
   } catch (error) {
     console.error(error);
-    res.status(500).json({ message: "Error interno del servidor" });
+    res.status(500).json({ message: 'Error interno del servidor' });
   }
 });
 
 // Ruta para eliminar un gasto por su ID
-router.delete("/delete-gasto/:id", openingHours, async (req, res) => {
+router.delete('/delete-gasto/:id', openingHours, async (req, res) => {
   const { id } = req.params;
 
   try {
     // Buscar y eliminar el gasto por su ID
     const gastoEliminado = await Gasto.findByIdAndDelete(id);
     if (!gastoEliminado) {
-      throw new Error("No se encontró el gasto para eliminar");
+      throw new Error('No se encontró el gasto para eliminar');
     }
 
     res.json({
-      tipo: "deleted",
+      tipo: 'deleted',
       info: {
         ...gastoEliminado.toObject(),
       },
     });
   } catch (error) {
-    console.error("Error al eliminar gasto:", error);
-    res.status(500).json({ mensaje: "Error al eliminar el gasto" });
+    console.error('Error al eliminar gasto:', error);
+    res.status(500).json({ mensaje: 'Error al eliminar el gasto' });
   }
 });
 

@@ -1,10 +1,11 @@
 import express from 'express';
 import Factura from '../models/Factura.js';
 import Gasto from '../models/gastos.js';
+import Negocio from '../models/negocio.js';
 import moment from 'moment';
 import 'moment-timezone';
 import Pagos from '../models/pagos.js';
-import { mapArrayByKey, mapObjectByKey } from '../utils/utilsFuncion.js';
+import { handleGetInfoDelivery, handleGetInfoOtros, mapArrayByKey, mapObjectByKey } from '../utils/utilsFuncion.js';
 import Usuario from '../models/usuarios/usuarios.js';
 import Producto from '../models/portafolio/productos/productos.js';
 import Servicio from '../models/portafolio/servicios.js';
@@ -211,13 +212,17 @@ router.get('/get-reporte-mensual-detallado', async (req, res) => {
       estadoPrenda: { $ne: 'anulado' },
     }).lean();
 
+    const idsFacturasAntiguas = new Set(
+      facturas.filter((factura) => factura.modeRegistro === 'antiguo').map((factura) => factura._id.toString())
+    );
+
     // Consultar los pagos dentro del rango de fechas y con isCounted true
     const pagos = await Pagos.find({
       'date.fecha': {
         $gte: fechaInicial.format('YYYY-MM-DD'),
         $lte: fechaFinal.format('YYYY-MM-DD'),
       },
-      isCounted: true,
+      //   isCounted: true,
     }).lean();
 
     // Consultar los gastos dentro del rango de fechas
@@ -228,12 +233,7 @@ router.get('/get-reporte-mensual-detallado', async (req, res) => {
       },
     }).lean();
 
-    // Obtener todos los métodos de pago únicos
-    const metodosPagoUnicos = [
-      ...new Set(
-        pagos.map((pago) => pago.metodoPago).filter((metodo) => metodo !== 'Efectivo' && metodo !== 'Tarjeta')
-      ),
-    ];
+    const facturasIds = new Set(facturas.map((factura) => factura._id.toString()));
 
     // Obtener tipos de gastos únicos
     const tiposGastosUnicos = [...new Set(gastos.map((gasto) => gasto.tipo))];
@@ -292,17 +292,7 @@ router.get('/get-reporte-mensual-detallado', async (req, res) => {
         reporte[fecha] = {
           orden: [],
           portafolio: [],
-          pagos: [
-            {
-              nombre: 'Efectivo',
-              monto: 0,
-            },
-            {
-              nombre: 'Tarjeta',
-              monto: 0,
-            },
-            ...metodosPagoUnicos.map((metodo) => ({ nombre: metodo, monto: 0 })),
-          ],
+          pagos: [],
           gastos: [...tiposGastosUnicos.map((tipo) => ({ nombre: tipo, monto: 0 }))],
           descuentos: [
             { nombre: 'Directo', monto: 0 },
@@ -411,21 +401,12 @@ router.get('/get-reporte-mensual-detallado', async (req, res) => {
     // Procesar pagos
     pagos.forEach((pago) => {
       const fecha = pago.date.fecha;
+
       if (!reporte[fecha]) {
         reporte[fecha] = {
           orden: [],
           portafolio: [],
-          pagos: [
-            {
-              nombre: 'Efectivo',
-              monto: 0,
-            },
-            {
-              nombre: 'Tarjeta',
-              monto: 0,
-            },
-            ...metodosPagoUnicos.map((metodo) => ({ nombre: metodo, monto: 0 })),
-          ],
+          pagos: [],
           gastos: [...tiposGastosUnicos.map((tipo) => ({ nombre: tipo, monto: 0 }))],
           descuentos: [
             { nombre: 'Directo', monto: 0 },
@@ -433,9 +414,16 @@ router.get('/get-reporte-mensual-detallado', async (req, res) => {
           ],
         };
       }
-      const metodoPago = reporte[fecha].pagos.find((p) => p.nombre === pago.metodoPago);
-      if (metodoPago) {
-        metodoPago.monto += pago.total;
+
+      if (idsFacturasAntiguas.has(pago.idOrden) && !pago.isCounted && pago.metodoPago !== 'Exonerar') {
+      } else {
+        reporte[fecha].pagos.push({
+          metodoPago: pago.metodoPago,
+          total: pago.total,
+          _id: pago._id,
+          isThisMonth: facturasIds.has(pago.idOrden),
+          isCounted: pago.isCounted,
+        });
       }
     });
 
@@ -446,17 +434,8 @@ router.get('/get-reporte-mensual-detallado', async (req, res) => {
         reporte[fecha] = {
           orden: [],
           portafolio: [],
-          pagos: [
-            {
-              nombre: 'Efectivo',
-              monto: 0,
-            },
-            {
-              nombre: 'Tarjeta',
-              monto: 0,
-            },
-            ...metodosPagoUnicos.map((metodo) => ({ nombre: metodo, monto: 0 })),
-          ],
+          pagos: [],
+          pagos: [],
           gastos: [...tiposGastosUnicos.map((tipo) => ({ nombre: tipo, monto: 0 }))],
           descuentos: [
             { nombre: 'descuentoManual', monto: 0 },
@@ -489,6 +468,294 @@ router.get('/get-reporte-mensual-detallado', async (req, res) => {
   } catch (error) {
     console.error(error);
     res.status(500).json({ mensaje: 'No se pudo generar el reporte mensual detallado' });
+  }
+});
+
+router.get('/get-reporte-items/by-descuento', async (req, res) => {
+  const { mes, anio } = req.query;
+
+  // Validar que los parámetros sean números y estén dentro de un rango lógico
+  if (!mes || !anio || isNaN(mes) || isNaN(anio) || mes < 1 || mes > 12) {
+    return res.status(400).json({ mensaje: 'Los parámetros mes y año son requeridos y deben ser válidos.' });
+  }
+
+  try {
+    // Construir fechas de inicio y fin del mes
+    const fechaInicial = moment(`${anio}-${mes}-01`, 'YYYY-MM').startOf('month').toDate();
+    const fechaFinal = moment(`${anio}-${mes}-01`, 'YYYY-MM').endOf('month').toDate();
+
+    // Obtener infoOtros para excluir un identificador específico
+    const infoOtros = await handleGetInfoOtros();
+
+    // Consultar facturas dentro del rango de fechas con estado válido
+    const ordenes = await Factura.find(
+      {
+        'infoRecepcion.fecha': { $gte: fechaInicial, $lte: fechaFinal },
+        estadoPrenda: { $ne: 'anulado' },
+        // 'Items.identificador': { $ne: infoOtros._id.toString() },
+        Items: { $elemMatch: { descuentoManual: { $gt: 0 } } },
+      },
+      {
+        codRecibo: 1,
+        Nombre: 1,
+        infoRecepcion: 1,
+        'Items.item': 1,
+        'Items.tipo': 1,
+        'Items.cantidad': 1,
+        'Items.precioBase': 1,
+        'Items.precioCobrado': 1,
+        'Items.descuentoManual': 1,
+        'Items.total': 1,
+      }
+    ).lean();
+
+    const reporteItems = ordenes.flatMap((orden) =>
+      orden.Items.filter((item) => item.descuentoManual > 0).map((item) => ({
+        _id: orden._id,
+        codRecibo: orden.codRecibo,
+        Nombre: orden.Nombre,
+        item: item.item,
+        tipo: item.tipo,
+        cantidad: parseFloat(Number(item.cantidad).toFixed(2)),
+        precioBase: parseFloat(Number(item.precioBase).toFixed(2)),
+        precioCobrado: parseFloat(Number(item.precioCobrado).toFixed(2)),
+        descuentoManual: parseFloat(Number(item.descuentoManual).toFixed(2)),
+        total: parseFloat(Number(item.total).toFixed(2)),
+        responsable: orden.infoRecepcion.responsable,
+        fechaRecepcion: orden.infoRecepcion.fecha,
+      }))
+    );
+
+    res.json(reporteItems);
+  } catch (error) {
+    console.error('Error al obtener el reporte:', error);
+    res.status(500).json({ mensaje: 'Error al obtener el reporte de items' });
+  }
+});
+
+router.get('/get-reporte-pagos/by-orden', async (req, res) => {
+  const { mes, anio } = req.query;
+
+  if (!mes || !anio || isNaN(mes) || isNaN(anio) || mes < 1 || mes > 12) {
+    return res.status(400).json({ mensaje: 'Los parámetros mes y año son requeridos y deben ser válidos.' });
+  }
+
+  try {
+    const fechaInicial = moment(`${anio}-${mes}-01`, 'YYYY-MM').startOf('month').toDate();
+    const fechaFinal = moment(`${anio}-${mes}-01`, 'YYYY-MM').endOf('month').toDate();
+
+    // Obtener facturas dentro del rango de fechas
+    const ordenes = await Factura.find(
+      {
+        'infoRecepcion.fecha': { $gte: fechaInicial, $lte: fechaFinal },
+        estadoPrenda: { $ne: 'anulado' },
+        listPago: { $exists: true, $ne: [] },
+      },
+      {
+        codRecibo: 1,
+        Nombre: 1,
+        infoRecepcion: 1,
+        modeRegistro: 1,
+        listPago: 1,
+      }
+    ).lean();
+
+    if (ordenes.length === 0) {
+      return res.json([]);
+    }
+
+    // Extraer y unificar los IDs de pagos
+    const idsPagos = [...new Set(ordenes.flatMap((orden) => orden.listPago))];
+
+    if (idsPagos.length === 0) {
+      return res.json([]);
+    }
+
+    // Consultar todos los pagos
+    const pagos = await Pagos.find({ _id: { $in: idsPagos } }).lean();
+
+    // Extraer y unificar los IDs de usuario responsable del pago
+    const idsResponsablePagos = [...new Set(pagos.flatMap((pago) => pago.idUser))];
+
+    // Consultar todos los usuarios
+    const usuarios = await Usuario.find({ _id: { $in: idsResponsablePagos } }).lean();
+
+    // Mapeo de Pagos por Orden
+    const mapPagosByOrden = mapArrayByKey(pagos, 'idOrden');
+
+    // Mapeo de Pagos por Orden
+    const mapUsuarios = mapObjectByKey(usuarios, '_id');
+
+    // 5️⃣ Mapear cada factura con sus pagos asociados
+    const reportePagos = ordenes.flatMap((orden) => {
+      return (mapPagosByOrden[orden._id.toString()] || []).map((pago) => ({
+        _id: orden._id,
+        codRecibo: orden.codRecibo,
+        Nombre: orden.Nombre,
+        fechaRecepcion: orden.infoRecepcion.fecha,
+        responsableOrden: orden.infoRecepcion.responsable,
+        metodoPago: pago.metodoPago,
+        totalPago: parseFloat(pago.total.toFixed(2)),
+        fechaPago: pago.date.fecha,
+        horaPago: pago.date.hora,
+        responsablePago: mapUsuarios[pago.idUser].name || 'NO INFORMACION',
+        detalle: pago.detail,
+        modeRegistro: orden.modeRegistro,
+      }));
+    });
+
+    res.json(reportePagos);
+  } catch (error) {
+    console.error('Error al obtener el reporte de pagos:', error);
+    res.status(500).json({ mensaje: 'Error al obtener el reporte de pagos' });
+  }
+});
+
+const generateDateArray = (type, filter) => {
+  let fechas = [];
+
+  if (type === 'daily') {
+    const { days } = filter;
+    // Generar fechas para los próximos 3 días
+    fechas = Array.from({ length: days }, (_, index) =>
+      moment().startOf('day').add(index, 'days').format('YYYY-MM-DD')
+    );
+    return fechas;
+  } else {
+    if (type === 'monthly') {
+      const { date } = filter;
+      // Generar fechas para todo el mes
+      const firstDayOfMonth = moment(date).startOf('month');
+      const lastDayOfMonth = moment(date).endOf('month');
+
+      let currentDate = moment(firstDayOfMonth);
+      while (currentDate <= lastDayOfMonth) {
+        fechas.push(currentDate.format('YYYY-MM-DD'));
+        currentDate.add(1, 'day');
+      }
+      return fechas;
+    }
+  }
+};
+
+router.get('/get-report/date-prevista/:startDate/:endDate', async (req, res) => {
+  try {
+    const { startDate, endDate } = req.params;
+
+    // Validar formato de fecha con moment
+    if (!moment(startDate, 'YYYY-MM-DD', true).isValid() || !moment(endDate, 'YYYY-MM-DD', true).isValid()) {
+      return res.status(400).json({ mensaje: 'Formato de fecha inválido. Use YYYY-MM-DD' });
+    }
+
+    const fechaInicio = moment(startDate, 'YYYY-MM-DD').startOf('day').toDate();
+    const fechaFin = moment(endDate, 'YYYY-MM-DD').endOf('day').toDate();
+
+    const infoReporte = [];
+
+    // Obtener información del negocio
+    const infoNegocio = await Negocio.findOne();
+    const itemsReporte = [...infoNegocio.itemsInformeDiario];
+
+    // Agregar servicio de delivery
+    const infoDelivery = await handleGetInfoDelivery();
+    itemsReporte.push({
+      order: itemsReporte.length,
+      id: `SER${infoDelivery._id.toString()}`,
+    });
+
+    const splitItem = itemsReporte.map((item) => ({
+      ID: item.id.substring(3),
+      TIPO: item.id.substring(0, 3),
+    }));
+
+    let groupedResults = [];
+
+    for (const item of splitItem) {
+      let resultObject = { idColumna: item.ID };
+      if (item.TIPO === 'CAT') {
+        const servicios = await Servicio.find({ idCategoria: item.ID }, '_id');
+        const productos = await Producto.find({ idCategoria: item.ID }, '_id');
+
+        resultObject.idsCantidades = [
+          ...servicios.map((s) => s._id.toString()),
+          ...productos.map((p) => p._id.toString()),
+        ];
+      } else {
+        resultObject.idsCantidades = [item.ID];
+      }
+      groupedResults.push(resultObject);
+    }
+
+    // Obtener facturas dentro del rango de fechas
+    const facturas = await Factura.find({
+      datePrevista: { $gte: fechaInicio, $lte: fechaFin },
+      estadoPrenda: { $nin: ['anulado', 'donado'] },
+    }).lean();
+
+    // Agrupar facturas por fecha prevista
+    const facturasPorFecha = facturas.reduce((acc, factura) => {
+      const fechaPrevista = moment(factura.datePrevista).format('YYYY-MM-DD');
+      acc[fechaPrevista] = acc[fechaPrevista] || [];
+      acc[fechaPrevista].push(factura);
+      return acc;
+    }, {});
+
+    // Construcción del informe
+    Object.entries(facturasPorFecha).forEach(([fechaPrevista, facturasDelDia]) => {
+      const resultado = {
+        FechaPrevista: fechaPrevista,
+        CantidadPedido: facturasDelDia.length,
+        InfoItems: {},
+        Facturas: facturasDelDia.map(
+          ({ _id, codRecibo, Nombre, Items, totalNeto, infoRecepcion, datePrevista, estadoPrenda }) => ({
+            _id,
+            codRecibo,
+            Nombre,
+            Items,
+            totalNeto,
+            infoRecepcion,
+            estadoPrenda,
+            datePrevista,
+          })
+        ),
+      };
+
+      // Calcular cantidad por identificador
+      facturasDelDia.forEach(({ Items }) => {
+        Items.forEach(({ identificador, cantidad }) => {
+          groupedResults.forEach(({ idColumna, idsCantidades }) => {
+            if (idsCantidades.includes(identificador)) {
+              resultado.InfoItems[idColumna] = (
+                parseFloat(resultado.InfoItems[idColumna] || 0) + Number(cantidad)
+              ).toFixed(2);
+            }
+          });
+        });
+      });
+
+      // Convertir InfoItems en array
+      resultado.InfoItems = Object.entries(resultado.InfoItems).map(([identificador, Cantidad]) => ({
+        identificador,
+        Cantidad,
+      }));
+
+      // Asegurar que todos los identificadores existan en InfoItems
+      groupedResults.forEach(({ idColumna }) => {
+        if (!resultado.InfoItems.find((item) => item.identificador === idColumna)) {
+          resultado.InfoItems.push({ identificador: idColumna, Cantidad: 0 });
+        }
+      });
+
+      infoReporte.push(resultado);
+    });
+
+    // Ordenar el informe por FechaPrevista (de menor a mayor)
+    infoReporte.sort((a, b) => moment(a.FechaPrevista).unix() - moment(b.FechaPrevista).unix());
+
+    res.json(infoReporte);
+  } catch (error) {
+    console.error('Error al obtener los datos:', error);
+    res.status(500).json({ mensaje: 'Error al obtener los datos' });
   }
 });
 

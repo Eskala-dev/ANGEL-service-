@@ -1,4 +1,4 @@
-import mongoose from "mongoose";
+import mongoose from 'mongoose';
 
 const pagosSchema = new mongoose.Schema({
   idOrden: String,
@@ -6,12 +6,13 @@ const pagosSchema = new mongoose.Schema({
     fecha: String,
     hora: String,
   },
-  metodoPago: String,
+  metodoPago: String, // Efectivo | Tarjeta |  OTROS METODOS QUE NO SE ESPECIFICAN
   total: Number,
   idUser: String,
   isCounted: Boolean,
+  detail: String,
 });
 
-const Pagos = mongoose.model("pagos", pagosSchema);
+const Pagos = mongoose.model('pagos', pagosSchema);
 
 export default Pagos;

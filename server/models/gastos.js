@@ -1,4 +1,4 @@
-import mongoose from "mongoose";
+import mongoose from 'mongoose';
 
 const gastoSchema = new mongoose.Schema(
   {
@@ -11,10 +11,11 @@ const gastoSchema = new mongoose.Schema(
     },
     monto: String,
     idUser: String,
+    metodoGasto: String, // Efectivo | Tarjeta |  OTROS METODOS QUE NO SE ESPECIFICAN
   },
-  { collection: "Gastos" }
+  { collection: 'Gastos' }
 );
 
-const Gasto = mongoose.model("Gasto", gastoSchema);
+const Gasto = mongoose.model('Gasto', gastoSchema);
 
 export default Gasto;

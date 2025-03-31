@@ -17,12 +17,10 @@ export const handleAddMovimientoProducto = async (data, session) => {
     info,
   });
 
-  const nuevoMovimiento = await newMovimiento.save({ session });
-
-  return nuevoMovimiento;
+  await newMovimiento.save({ session });
 };
 
-router.post('/add-movimiento', async (req, res) => {
+router.post('/add-movimiento-producto', async (req, res) => {
   const session = await db.startSession();
   session.startTransaction();
 
@@ -30,7 +28,7 @@ router.post('/add-movimiento', async (req, res) => {
     const { idProducto, accion, cantidad, tipo, info } = req.body;
 
     // Agregar el nuevo movimiento
-    const newMovimiento = await handleAddMovimientoProducto({ idProducto, accion, cantidad, tipo, info }, session);
+    await handleAddMovimientoProducto({ idProducto, accion, cantidad, tipo, info }, session);
 
     // Actualizar el stock principal del producto
     const producto = await Producto.findById(idProducto).session(session);
@@ -57,11 +55,9 @@ router.post('/add-movimiento', async (req, res) => {
       [{ _id: producto._id.toString(), stockPrincipal: producto.stockPrincipal }],
       socketId
     );
-    emitToClients('service:addNewsMovimientos', [newMovimiento], socketId);
 
     res.json({
       _id: producto._id.toString(),
-      newMovimiento,
       stockPrincipal: producto.stockPrincipal,
     });
   } catch (error) {

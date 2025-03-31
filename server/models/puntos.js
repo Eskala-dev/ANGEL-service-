@@ -5,6 +5,7 @@ const puntosSchema = new mongoose.Schema(
     score: String,
     valor: String,
     useState: Boolean,
+    showPuntosByDefault: Boolean,
   },
   { collection: 'Puntos' }
 );

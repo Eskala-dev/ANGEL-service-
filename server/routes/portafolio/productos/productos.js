@@ -5,6 +5,7 @@ import { mapArrayByKey } from '../../../utils/utilsFuncion.js';
 import { handleAddMovimientoProducto } from './movimientosProducto.js';
 import db from '../../../config/db.js';
 import { emitToClients } from '../../../socket/socketServer.js';
+import { verificarUsoProductos } from '../../negocio.js';
 
 const router = express.Router();
 
@@ -29,7 +30,7 @@ router.post('/add-producto', async (req, res) => {
 
     const productoGuardado = await newProducto.save({ session });
 
-    const newMovimiento = await handleAddMovimientoProducto(
+    await handleAddMovimientoProducto(
       {
         idProducto: productoGuardado._id,
         accion,
@@ -47,15 +48,12 @@ router.post('/add-producto', async (req, res) => {
       'service:changeProducto',
       {
         tipoAction: 'added',
-        data: { ...productoGuardado.toObject(), movimientos: [newMovimiento.toObject()] },
+        data: productoGuardado,
       },
       socketId
     );
 
-    res.json({
-      ...productoGuardado.toObject(),
-      movimientos: [newMovimiento.toObject()],
-    });
+    res.json(productoGuardado);
   } catch (error) {
     if (session.inTransaction()) {
       await session.abortTransaction();
@@ -67,27 +65,11 @@ router.post('/add-producto', async (req, res) => {
   }
 });
 
-router.get('/get-productos', async (req, res) => {
+router.get('/get-productos', verificarUsoProductos, async (req, res) => {
   try {
     const productos = await Producto.find();
-    const productoIds = productos.map((producto) => producto._id);
 
-    const movimientosPromises = productoIds.map((idProducto) =>
-      MovimientoProducto.find({ idProducto }).sort({ _id: -1 }).limit(5).lean()
-    );
-
-    const movimientos = await Promise.all(movimientosPromises);
-
-    // Crear un mapa de movimientos agrupados por idProducto
-    const movimientosMap = mapArrayByKey(movimientos.flat(), 'idProducto');
-
-    // Asignar los movimientos a cada producto
-    const productosConMovimientos = productos.map((producto) => ({
-      ...producto.toObject(),
-      movimientos: movimientosMap[producto._id] || [],
-    }));
-
-    res.json(productosConMovimientos);
+    res.json(productos);
   } catch (error) {
     console.error('Error al obtener productos:', error);
     res.status(500).json({ mensaje: 'Error al obtener productos' });
