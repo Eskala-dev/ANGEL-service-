@@ -1,14 +1,15 @@
 import mongoose from 'mongoose';
+import { idCluster, nameDB, passDB, userDB } from '../utils/varsGlobal.js';
 
 export const connectDB = async () => {
+  const uri = `mongodb+srv://${userDB}:${passDB}@${idCluster}.mongodb.net/${nameDB}?retryWrites=true&w=majority`;
+
   try {
-    await mongoose.connect(
-      'mongodb+srv://eskaladev:shfxE76ZRS7GW0YT@instancia2.qmaflsy.mongodb.net/db-angel-dias?retryWrites=true&w=majority&appName=Instancia2',
-      {
-        useNewUrlParser: true,
-        useUnifiedTopology: true,
-      }
-    );
+    console.log(uri);
+    await mongoose.connect(uri, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
     console.log('Conexión exitosa a MongoDB');
   } catch (error) {
     console.error('Error al conectar a MongoDB:', error);

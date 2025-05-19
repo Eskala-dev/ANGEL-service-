@@ -1,7 +1,6 @@
 import express from 'express';
 import http from 'http';
 import cors from 'cors';
-import { PORT } from './server/config/config.js';
 
 import { connectDB } from './server/config/db.js';
 import socketServer from './server/socket/socketServer.js';
@@ -36,7 +35,7 @@ import insumosRoutes from './server/routes/portafolio/insumos/insumos.js';
 import movimientoInsumoRoutes from './server/routes/portafolio/insumos/movimientosInsumo.js';
 import counterStockRoutes from './server/routes/portafolio/counterStock.js';
 
-import { timeZone } from './server/utils/varsGlobal.js';
+import { idCluster, nameCliente, PORT, timeZone } from './server/utils/varsGlobal.js';
 import moment from 'moment';
 import 'moment/locale/es.js';
 import 'moment-timezone';
@@ -132,7 +131,7 @@ app.get('/', (req, res) => {
         <title>Estado del Servidor</title>
       </head>
       <body>
-        <h1>Estado del Servidor</h1>
+        <h1>Estado del Servidor - ${nameCliente} </h1>
         <p>El servidor está funcionando correctamente.</p>
       </body>
     </html>

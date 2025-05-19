@@ -21,11 +21,6 @@ const socketServer = (httpServer) => {
       connectedClients.delete(socket.id);
     });
 
-    // Maneja eventos cuando el cliente envía un mensaje
-    socket.on('client:changeOrder', (info) => {
-      socket.broadcast.emit('server:changeOrder', info);
-    });
-
     socket.on('client:updateCodigo', (info) => {
       io.emit('server:updateCodigo', info);
     });
